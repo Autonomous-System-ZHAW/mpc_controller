@@ -10,30 +10,27 @@ class BicycleModel:
         # car parameter
         self.L = L
         self.dt = dt
-        self.steering_angle_max = MAX_STEERING_ANGLE_RADIANS
-        self.steering_angle_min = MIN_STEERING_ANGLE_RADIANS
 
         # states
         X = SX.sym("X")
         Y = SX.sym("Y")
         psi = SX.sym("psi")
-        v = SX.sym("v")
-        x = vertcat(X, Y, psi, v)
+        x = vertcat(X, Y, psi)
 
         # inputs
-        a = SX.sym("a")
+        v = SX.sym("v")
         delta = SX.sym("delta")
-        u = vertcat(a, delta)
+        u = vertcat(v, delta)
 
         # continuous dynamics
         dX = v * SX.cos(psi)
         dY = v * SX.sin(psi)
         dpsi = v / self.L * SX.tan(delta)
-        dv = a
-        f = vertcat(dX, dY, dpsi, dv)
+
+        f = vertcat(dX, dY, dpsi)
 
         # euler discretization
-        x_next = x + self.dt * f
+        x_next = x + dt * f
 
         # acados model
         model = AcadosModel()
