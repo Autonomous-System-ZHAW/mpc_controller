@@ -1,9 +1,6 @@
 from casadi import SX, vertcat
 from acados_template import AcadosModel
 
-MAX_STEERING_ANGLE_RADIANS = 0.37  # rad
-MIN_STEERING_ANGLE_RADIANS = -0.37  # rad
-
 
 class BicycleModel:
     def __init__(self, L=0.33, dt=0.01):
