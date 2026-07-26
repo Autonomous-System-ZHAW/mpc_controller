@@ -4,32 +4,45 @@ from casadi import *
 from casadi.tools import *
 import sys
 
+from . import globals
+
 sys.path.append("../../")
 
 
 class MPC:
     def __init__(self, vehicle):
-
         self.vehicle = vehicle
         self.model = vehicle.model
 
-        self.horizon = 15
+        self.horizon = 8
+        globals.horizon = self.horizon
 
-        self.Ts = 0.05
+        self.sim_Ts = 0.01667
+        self.mpc_Ts = 0.025
 
         self.current_prediction = None
 
         self.mpc = do_mpc.controller.MPC(self.model)
+
+        # disable to output!
+        nlpsol_opts = {
+            "ipopt.print_level": 0,
+            "print_time": 0,
+        }
+
+        self.mpc.set_param(nlpsol_opts=nlpsol_opts)
+
         setup_mpc = {
             "n_robust": 0,
             "n_horizon": self.horizon,
-            "t_step": self.Ts,
+            "t_step": self.mpc_Ts,
             "state_discretization": "collocation",
             "store_full_solution": True,
         }
         self.mpc.set_param(**setup_mpc)
 
         # define the objective function and constriants
+        self.objective_function_setup()
         self.constraints_setup()
 
         # provide time-varing parameters: setpoints/references
@@ -38,21 +51,23 @@ class MPC:
 
         self.mpc.setup()
 
-    def tvp_fun(self):
+    def tvp_fun(self, t_now):
         """
         provides data into time-varying parameters
         """
-        ey_ub, ey_lb, _ = self.update_new_bound()
+
+        # ey_ub, ey_lb, _ = self.update_new_bound()
         for k in range(self.horizon):
             # extract information from current waypoint
             current_waypoint = self.vehicle.reference_path.get_waypoint(
                 self.vehicle.wp_id + k
             )
+
             self.tvp_template["_tvp", k, "x_ref"] = current_waypoint.x
             self.tvp_template["_tvp", k, "y_ref"] = current_waypoint.y
             self.tvp_template["_tvp", k, "psi_ref"] = current_waypoint.psi
-            self.tvp_template["_tvp", k, "ey_lb"] = ey_lb[k]
-            self.tvp_template["_tvp", k, "ey_ub"] = ey_ub[k]
+            # self.tvp_template["_tvp", k, "ey_lb"] = ey_lb[k]
+            # self.tvp_template["_tvp", k, "ey_ub"] = ey_ub[k]
             if current_waypoint.v_ref is not None:
                 self.tvp_template["_tvp", k, "vel_ref"] = current_waypoint.v_ref
             else:
@@ -60,7 +75,7 @@ class MPC:
 
         return self.tvp_template
 
-    def constraints_setup(self, vel_bound=[0.0, 1.0], reset=False):
+    def constraints_setup(self, vel_bound=[0.1, 2.0], reset=False):
 
         # states constraints
         self.mpc.bounds["lower", "_x", "pos_x"] = -np.inf
@@ -71,14 +86,14 @@ class MPC:
         self.mpc.bounds["upper", "_x", "psi"] = 2 * np.pi
         self.mpc.bounds["lower", "_x", "vel"] = vel_bound[0]
         self.mpc.bounds["upper", "_x", "vel"] = vel_bound[1]
-        self.mpc.bounds["lower", "_x", "e_y"] = -2
-        self.mpc.bounds["upper", "_x", "e_y"] = 2
+        self.mpc.bounds["lower", "_x", "e_y"] = -1.0
+        self.mpc.bounds["upper", "_x", "e_y"] = 1.0
 
         # input constraints
-        self.mpc.bounds["lower", "_u", "acc"] = -0.5
+        self.mpc.bounds["lower", "_u", "acc"] = 0.1
         self.mpc.bounds["upper", "_u", "acc"] = 0.5
-        self.mpc.bounds["lower", "_u", "delta"] = -1
-        self.mpc.bounds["upper", "_u", "delta"] = 1
+        self.mpc.bounds["lower", "_u", "delta"] = -0.33
+        self.mpc.bounds["upper", "_u", "delta"] = 0.33
 
         if reset is True:
             self.mpc.setup()
@@ -106,16 +121,36 @@ class MPC:
         # update current waypoint
         self.vehicle.get_current_waypoint()
 
+        current_x = self.vehicle.current_waypoint.x
+        current_y = self.vehicle.current_waypoint.y
+        # print(f"current waypoint x", self.vehicle.current_waypoint.x)
+        # print(f"current waypoint x", self.vehicle.current_waypoint.y)
+
         # solve optization problem
         u0 = self.mpc.make_step(x0)
 
-        return np.array([u0[0], u0[1]])
+        return np.array([u0[0], u0[1]]), current_x, current_y
 
     def distance_update(self, states):
         vel, psi = states[3], states[2]
 
-        # Compute velocity along path
         s_dot = vel * np.cos(self.mpc.data["_aux", "psi_diff"][0])
 
-        # Update distance travelled along reference path
-        self.s += s_dot * self.Ts
+        globals.s += s_dot * self.mpc_Ts
+
+    def objective_function_setup(self):
+        # obstacle avoidance
+
+        lterm = (
+            self.model.aux["psi_diff"] ** 2
+            + (self.model.x["pos_x"] - self.model.tvp["x_ref"]) ** 2
+            + (self.model.x["pos_y"] - self.model.tvp["y_ref"]) ** 2
+        )
+        mterm = (
+            (self.model.x["pos_x"] - self.model.tvp["x_ref"]) ** 2
+            + (self.model.x["pos_y"] - self.model.tvp["y_ref"]) ** 2
+            + 0.1 * (self.model.x["vel"] - self.model.tvp["vel_ref"]) ** 2
+        )
+
+        self.mpc.set_objective(mterm=mterm, lterm=lterm)
+        # self.mpc.set_rterm(acc=0.01, delta=0.01)

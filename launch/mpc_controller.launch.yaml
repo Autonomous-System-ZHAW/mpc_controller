@@ -1,0 +1,7 @@
+
+launch:
+
+- node:
+    pkg: "mpc_controller"
+    exec: "mpc_node"
+    name: "mpc_node"

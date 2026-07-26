@@ -4,13 +4,14 @@ from casadi import *
 from casadi.tools import *
 import sys
 
-from reference_path import ReferencePath
+from mpc_controller.reference_path import ReferencePath
+from . import globals
 
 sys.path.append("../../")
 
 
 class simple_bycicle_model:
-    def __init__(self, reference_path, length, width, Ts):
+    def __init__(self, reference_path, length, width):
 
         # car paramters
         self.length = length
@@ -25,7 +26,7 @@ class simple_bycicle_model:
         self.current_waypoint = self.reference_path.waypoints[self.wp_id]
 
         # model
-        self.Ts = Ts
+        # self.Ts = Ts
 
     def model_setup(self):
 
@@ -78,6 +79,7 @@ class simple_bycicle_model:
         sum_length = np.cumsum(self.reference_path.segment_lengths)
 
         find_greater_value = sum_length > globals.s
+
         next_wp_id = find_greater_value.searchsorted(True)
 
         # dervie the distance traveled of two id points

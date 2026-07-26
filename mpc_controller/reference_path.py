@@ -1,10 +1,8 @@
 import numpy as np
 import math
-from map import Map, Obstacle
-from skimage.draw import line_aa
-import matplotlib.pyplot as plt
-from scipy import sparse
+
 import osqp
+from scipy import sparse
 
 
 class Waypoint:
@@ -48,15 +46,20 @@ class Waypoint:
 
 
 class ReferencePath:
-    def __init__(self, wp_x, wp_y, smoothing_distance, max_width, circular):
+    def __init__(
+        self,
+        waypoints: list,
+        resolution: float,
+        smoothing_distance: float,
+        max_width: float,
+        circular: bool,
+    ):
         """
         Reference Path object. Create a reference trajectory from specified
         corner points with given resolution. Smoothing around corners can be
         applied. Waypoints represent center-line of the path with specified
         maximum width to both sides.
-        :param map: map object on which path will be placed
-        :param wp_x: x coordinates of corner points in global coordinates
-        :param wp_y: y coordinates of corner points in global coordinates
+        :waypoints: list of [x, y] coordinates of corner points in global coordinates
         :param resolution: resolution of the path in m/wp
         :param smoothing_distance: number of waypoints used for smoothing the
         path by averaging neighborhood of waypoints
@@ -67,6 +70,8 @@ class ReferencePath:
         # Precision
         self.eps = 1e-12
 
+        self.resolution = resolution
+
         # Look ahead distance for path averaging
         self.smoothing_distance = smoothing_distance
 
@@ -74,7 +79,7 @@ class ReferencePath:
         self.circular = circular
 
         # List of waypoint objects
-        self.waypoints = self._construct_path(wp_x, wp_y)
+        self.waypoints = self._construct_path(waypoints)
 
         # Number of waypoints
         self.n_waypoints = len(self.waypoints)
@@ -83,35 +88,41 @@ class ReferencePath:
         self.length, self.segment_lengths = self._compute_length()
 
         # Compute path width (attribute of each waypoint)
-        self._compute_width(max_width=max_width)
+        # self._compute_width(max_width=max_width)
 
-    def _construct_path(self, wp_x, wp_y):
+    def _construct_path(self, waypoints):
         """
         Construct path from given waypoints.
-        :param wp_x: x coordinates of waypoints in global coordinates
-        :param wp_y: y coordinates of waypoints in global coordinates
+        :param waypoints: list of [x, y] coordinates
         :return: list of waypoint objects
         """
 
         # Number of waypoints
         n_wp = [
             int(
-                np.sqrt((wp_x[i + 1] - wp_x[i]) ** 2 + (wp_y[i + 1] - wp_y[i]) ** 2)
+                np.sqrt(
+                    (waypoints[i + 1][0] - waypoints[i][0]) ** 2
+                    + (waypoints[i + 1][1] - waypoints[i][1]) ** 2
+                )
                 / self.resolution
             )
-            for i in range(len(wp_x) - 1)
+            for i in range(len(waypoints) - 1)
         ]
 
         # Construct waypoints with specified resolution
-        gp_x, gp_y = wp_x[-1], wp_y[-1]
+        gp_x, gp_y = waypoints[-1][0], waypoints[-1][1]
         wp_x = [
-            np.linspace(wp_x[i], wp_x[i + 1], n_wp[i], endpoint=False).tolist()
-            for i in range(len(wp_x) - 1)
+            np.linspace(
+                waypoints[i][0], waypoints[i + 1][0], n_wp[i], endpoint=False
+            ).tolist()
+            for i in range(len(waypoints) - 1)
         ]
         wp_x = [wp for segment in wp_x for wp in segment] + [gp_x]
         wp_y = [
-            np.linspace(wp_y[i], wp_y[i + 1], n_wp[i], endpoint=False).tolist()
-            for i in range(len(wp_y) - 1)
+            np.linspace(
+                waypoints[i][1], waypoints[i + 1][1], n_wp[i], endpoint=False
+            ).tolist()
+            for i in range(len(waypoints) - 1)
         ]
         wp_y = [wp for segment in wp_y for wp in segment] + [gp_y]
 
@@ -145,6 +156,9 @@ class ReferencePath:
         # Construct list of waypoint objects
         waypoints = list(zip(wp_xs, wp_ys))
         waypoints = self._construct_waypoints(waypoints)
+
+        # for i, waypoint in enumerate(waypoints):
+        #     print(f"Waypoint {i}: " f"x={waypoint.x}, " f"y={waypoint.y}, ")
 
         return waypoints
 
@@ -229,6 +243,7 @@ class ReferencePath:
                 t_x, t_y = self.map.w2m(
                     wp.x + max_width * np.cos(angle), wp.y + max_width * np.sin(angle)
                 )
+
                 # Compute distance to orthogonal cell on path border
                 b_value, b_cell = self._get_min_width(wp, t_x, t_y, max_width)
                 # Add information to list for current waypoint
@@ -568,73 +583,3 @@ class ReferencePath:
             wp.dynamic_border_cells = bound_cells_sm
 
         return np.array(ub_hor), np.array(lb_hor), border_cells_hor_sm
-
-
-if __name__ == "__main__":
-
-    # Select Track | 'Real_Track' or 'Sim_Track'
-    path = "Sim_Track"
-
-    if path == "Sim_Track":
-
-        # Specify waypoints
-        wp_x = [
-            -0.75,
-            -0.25,
-            -0.25,
-            0.25,
-            0.25,
-            1.25,
-            1.25,
-            0.75,
-            0.75,
-            1.25,
-            1.25,
-            -0.75,
-            -0.75,
-            -0.25,
-        ]
-        wp_y = [
-            -1.5,
-            -1.5,
-            -0.5,
-            -0.5,
-            -1.5,
-            -1.5,
-            -1,
-            -1,
-            -0.5,
-            -0.5,
-            0,
-            0,
-            -1.5,
-            -1.5,
-        ]
-
-        # Specify path resolution
-        path_resolution = 0.05  # m / wp
-
-        # Create reference path
-        reference_path = ReferencePath(
-            wp_x,
-            wp_y,
-            path_resolution,
-            smoothing_distance=5,
-            max_width=0.15,
-            circular=True,
-        )
-
-    ub, lb, border_cells = reference_path.update_path_constraints(
-        0, reference_path.n_waypoints, 0.1, 0.01
-    )
-    SpeedProfileConstraints = {
-        "a_min": -0.1,
-        "a_max": 0.5,
-        "v_min": 0,
-        "v_max": 1.0,
-        "ay_max": 4.0,
-    }
-    reference_path.compute_speed_profile(SpeedProfileConstraints)
-    # Get x and y locations of border cells for upper and lower bound
-    for wp_id in range(reference_path.n_waypoints):
-        reference_path.waypoints[wp_id].dynamic_border_cells = border_cells[wp_id]
