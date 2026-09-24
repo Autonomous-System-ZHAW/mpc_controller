@@ -14,10 +14,9 @@ class MPC:
         self.vehicle = vehicle
         self.model = vehicle.model
 
-        self.horizon = 8
+        self.horizon = 20
         globals.horizon = self.horizon
 
-        self.sim_Ts = 0.01667
         self.mpc_Ts = 0.025
 
         self.current_prediction = None
@@ -52,26 +51,32 @@ class MPC:
         self.mpc.setup()
 
     def tvp_fun(self, t_now):
-        """
-        provides data into time-varying parameters
-        """
+        path_resolution = 0.01
 
-        # ey_ub, ey_lb, _ = self.update_new_bound()
-        for k in range(self.horizon):
-            # extract information from current waypoint
+        v_plan = self.vehicle.current_waypoint.v_ref
+        if v_plan is None:
+            v_plan = 0.3
+
+        for k in range(self.horizon + 1):
+            # Zeitpunkt dieses MPC-Schritts
+            future_time = k * self.mpc_Ts
+
+            # Erwartete Strecke bis zu diesem Zeitpunkt
+            distance_ahead = v_plan * future_time
+
+            # Strecke in Wegpunktindex umrechnen
+            waypoint_offset = int(round(distance_ahead / path_resolution))
+
             current_waypoint = self.vehicle.reference_path.get_waypoint(
-                self.vehicle.wp_id + k
+                self.vehicle.wp_id + waypoint_offset
             )
 
             self.tvp_template["_tvp", k, "x_ref"] = current_waypoint.x
             self.tvp_template["_tvp", k, "y_ref"] = current_waypoint.y
             self.tvp_template["_tvp", k, "psi_ref"] = current_waypoint.psi
-            # self.tvp_template["_tvp", k, "ey_lb"] = ey_lb[k]
-            # self.tvp_template["_tvp", k, "ey_ub"] = ey_ub[k]
-            if current_waypoint.v_ref is not None:
-                self.tvp_template["_tvp", k, "vel_ref"] = current_waypoint.v_ref
-            else:
-                self.tvp_template["_tvp", k, "vel_ref"] = 0
+            self.tvp_template["_tvp", k, "vel_ref"] = (
+                current_waypoint.v_ref if current_waypoint.v_ref is not None else v_plan
+            )
 
         return self.tvp_template
 
@@ -90,7 +95,7 @@ class MPC:
         self.mpc.bounds["upper", "_x", "e_y"] = 1.0
 
         # input constraints
-        self.mpc.bounds["lower", "_u", "acc"] = 0.1
+        self.mpc.bounds["lower", "_u", "acc"] = -0.5
         self.mpc.bounds["upper", "_u", "acc"] = 0.5
         self.mpc.bounds["lower", "_u", "delta"] = -0.33
         self.mpc.bounds["upper", "_u", "delta"] = 0.33
@@ -131,16 +136,14 @@ class MPC:
 
         return np.array([u0[0], u0[1]]), current_x, current_y
 
-    def distance_update(self, states):
+    def distance_update(self, states, time_diff_s):
         vel, psi = states[3], states[2]
 
         s_dot = vel * np.cos(self.mpc.data["_aux", "psi_diff"][0])
 
-        globals.s += s_dot * self.mpc_Ts
+        globals.s += s_dot * time_diff_s
 
     def objective_function_setup(self):
-        # obstacle avoidance
-
         lterm = (
             self.model.aux["psi_diff"] ** 2
             + (self.model.x["pos_x"] - self.model.tvp["x_ref"]) ** 2

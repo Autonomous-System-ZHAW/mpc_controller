@@ -24,6 +24,7 @@ from mpc_controller.model import ReferencePath, simple_bycicle_model
 from nav_msgs.msg._odometry import Odometry
 from geometry_msgs.msg import Point, TransformStamped
 from tf2_ros import TransformBroadcaster
+from rclpy.time import Time
 
 
 class MPCNode(Node):
@@ -36,9 +37,12 @@ class MPCNode(Node):
         self.vehicle = None
         self.controller = None
         self.x0 = None
+        self.last_odom_time_stamp = None
+        self.latest_odom_time = None
+        self.latest_odom_dt = None
+        self.mpc_period = 0.025
 
         self.load_from_yaml()
-        # self.get_logger().info(f"Loaded waypoints: {self.waypoints}")
 
         marker_qos = QoSProfile(
             depth=1,
@@ -47,24 +51,24 @@ class MPCNode(Node):
             history=HistoryPolicy.KEEP_LAST,
         )
 
-        self.waypoint_pub = self.create_publisher(
-            Marker,
-            "/debug/waypoints",
-            marker_qos,
-        )
-
         self.current_waypoint_pub = self.create_publisher(
             Marker,
             "/debug/current_waypoint",
             marker_qos,
         )
 
-        self.publish_waypoints()
+        self.waypoint_pub = self.create_publisher(
+            Marker,
+            "/debug/waypoints",
+            marker_qos,
+        )
 
         self.environment_setup()
         self.MPC_Problem_setup()
 
         self.set_initial_state()
+
+        self.publish_waypoints()
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
@@ -76,13 +80,8 @@ class MPCNode(Node):
         )
 
         self.mpc_timer = self.create_timer(
-            0.025,
+            self.mpc_period,
             self.mpc_callback,
-        )
-
-        self.waypoint_timer = self.create_timer(
-            0.05,
-            self.publish_waypoints,
         )
 
         self.ackermann_pub = self.create_publisher(
@@ -92,6 +91,16 @@ class MPCNode(Node):
         )
 
     def odom_callback(self, msg: Odometry):
+        current_time = Time.from_msg(msg.header.stamp)
+
+        if self.last_odom_time_stamp is None:
+            self.last_odom_time_stamp = current_time
+            return
+
+        dt_odom = (current_time - self.last_odom_time_stamp).nanoseconds / 1e9
+
+        self.last_odom_time_stamp = current_time
+
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
         q = msg.pose.pose.orientation
@@ -99,26 +108,34 @@ class MPCNode(Node):
         # based on https://www.vcalc.com/wiki/quaternion-to-roll-pitch-yaw
         # convert a quanternium into yaw
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        cosy_cosp = 1.0 - 2.0 * (q.y**2 + q.z**2)
         psi = math.atan2(siny_cosp, cosy_cosp)
 
         velocity = msg.twist.twist.linear.x
 
+        theta = -np.pi / 2
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+
+        x_map = 1.75 + cos_theta * x - sin_theta * y
+        y_map = 5.25 + sin_theta * x + cos_theta * y
+        psi_map = np.arctan2(
+            np.sin(psi + theta),
+            np.cos(psi + theta),
+        )
+
         self.x0 = np.array(
             [
-                x + 1.75,  # offset of the map in x
-                y + 5.25,  # offset of the map in y
-                psi - np.pi / 2,  # because of 90° offset, rotation of the map
+                x_map,
+                y_map,
+                psi_map,
                 velocity,
                 0.0,
             ]
         )
 
-        print(f"x0: ", self.x0)
-
-        # self.get_logger().info(f"New x0: {self.x0}")
-
-        # self.mpc_callback()
+        self.latest_odom_dt = dt_odom
+        self.latest_odom_time = self.get_clock().now()
 
     def load_from_yaml(self):
         with open(
@@ -139,27 +156,32 @@ class MPCNode(Node):
         marker.type = Marker.POINTS
         marker.action = Marker.ADD
 
-        # Größe der Punkte
         marker.scale.x = 0.1
         marker.scale.y = 0.1
 
-        # Rot
         marker.color.r = 1.0
         marker.color.g = 0.0
         marker.color.b = 0.0
         marker.color.a = 1.0
 
-        for x, y in self.waypoints:
-            p = Point()
-            p.x = float(x)
-            p.y = float(y)
-            p.z = 0.0
+        # for x, y in self.waypoints:
+        #     p = Point()
+        #     p.x = float(x)
+        #     p.y = float(y)
+        #     p.z = 0.0
 
+        #     marker.points.append(p)
+
+        for waypoint in self.reference_path.waypoints:
+            p = Point()
+            p.x = float(waypoint.x)
+            p.y = float(waypoint.y)
+            p.z = 0.0
             marker.points.append(p)
 
-        self.current_waypoint_pub.publish(marker)
+        self.waypoint_pub.publish(marker)
 
-    def publish_current_waypoints(self, current_x, current_y):
+    def publish_current_waypoint(self, current_x, current_y):
         marker = Marker()
 
         marker.header.frame_id = "world"
@@ -187,7 +209,7 @@ class MPCNode(Node):
 
         marker.points.append(p)
 
-        self.waypoint_pub.publish(marker)
+        self.current_waypoint_pub.publish(marker)
 
     def MPC_Problem_setup(
         self,
@@ -212,6 +234,8 @@ class MPCNode(Node):
 
         self.controller = MPC(self.vehicle)
 
+        self.controller.constraints_setup()
+
         # Compute speed profile
         SpeedProfileConstraints = {
             "a_min": a_min,
@@ -224,13 +248,13 @@ class MPCNode(Node):
         self.vehicle.reference_path.compute_speed_profile(SpeedProfileConstraints)
 
     def environment_setup(self):
-        path_resolution = 0.1
+        path_resolution = 0.01
 
         # Create smoothed reference path
         self.reference_path = ReferencePath(
             self.waypoints,
             path_resolution,
-            smoothing_distance=5,
+            smoothing_distance=10,
             max_width=0.2,
             circular=True,
         )
@@ -258,34 +282,20 @@ class MPCNode(Node):
         if self.x0 is None:
             return
 
-        # print("NODE x0 BEFORE MPC:", self.x0)
-        # print("MPC INTERNAL x0:", self.controller.mpc.x0)
-
         u, current_x, current_y = self.controller.get_control(self.x0)
 
-        # print("MPC INPUT:", self.x0)
-        # print("MPC OUTPUT u:", u)
-        # print("current reference:", current_x, current_y)
-
-        self.publish_current_waypoints(
+        self.publish_current_waypoint(
             current_x,
             current_y,
         )
 
-        self.controller.distance_update(self.x0)
-
-        self.controller.constraints_setup()
-
-        dt = 0.025
+        self.controller.distance_update(self.x0, self.latest_odom_dt)
 
         acc = float(u[0])
         delta = float(u[1])
 
-        current_velocity = self.x0[3]
+        target_velocity = float(self.x0[3]) + acc * self.mpc_period
 
-        target_velocity = current_velocity + acc * dt
-
-        # Dein Speed Profile hat v_min=0 und v_max=1
         target_velocity = np.clip(
             target_velocity,
             0.0,
@@ -294,12 +304,10 @@ class MPCNode(Node):
 
         ackermann_msg = AckermannDriveStamped()
         ackermann_msg.header.stamp = self.get_clock().now().to_msg()
-
         ackermann_msg.drive.speed = float(target_velocity)
         ackermann_msg.drive.acceleration = acc
         ackermann_msg.drive.steering_angle = delta
 
-        print(f"steering angle: ", delta)
         self.ackermann_pub.publish(ackermann_msg)
 
 

@@ -155,6 +155,9 @@ class ReferencePath:
 
         # Construct list of waypoint objects
         waypoints = list(zip(wp_xs, wp_ys))
+
+        print(f"len waypoint: ", len(waypoints))
+
         waypoints = self._construct_waypoints(waypoints)
 
         # for i, waypoint in enumerate(waypoints):
