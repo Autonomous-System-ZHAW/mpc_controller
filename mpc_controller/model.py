@@ -57,7 +57,8 @@ class simple_bycicle_model:
         ey_ub = self.model.set_variable(var_type="_tvp", var_name="ey_ub")
 
         # tracking errors (optimization variables):
-        psi_diff = fmod(psi - psi_ref + np.pi, 2 * np.pi) - np.pi
+        # atan2(sin, cos) wraps the difference to [-pi, pi] in both directions
+        psi_diff = atan2(sin(psi - psi_ref), cos(psi - psi_ref))
         # introduce expression psi difference for monitoring
         self.model.set_expression("psi_diff", psi_diff)
 
@@ -75,21 +76,24 @@ class simple_bycicle_model:
         return self.width / np.sqrt(2)
 
     def get_current_waypoint(self):
-        # Compute the sum of the path length
-        sum_length = np.cumsum(self.reference_path.segment_lengths)
+        # arc length of each waypoint, starting with 0.0 for waypoint 0
+        sum_length = np.concatenate(
+            ([0.0], np.cumsum(self.reference_path.segment_lengths))
+        )
 
-        find_greater_value = sum_length > globals.s
+        # first waypoint whose arc length is greater than s
+        next_wp_id = int(np.searchsorted(sum_length, globals.s, side="right"))
 
-        next_wp_id = find_greater_value.searchsorted(True)
+        # end of the lap: stay on the last waypoint instead of running out of the array
+        if next_wp_id >= len(sum_length):
+            next_wp_id = len(sum_length) - 1
+        prev_wp_id = max(next_wp_id - 1, 0)
 
-        # dervie the distance traveled of two id points
-        prev_wp_id = next_wp_id - 1
         s_next = sum_length[next_wp_id]
         s_prev = sum_length[prev_wp_id]
 
         if np.abs(globals.s - s_next) < np.abs(globals.s - s_prev):
             self.wp_id = next_wp_id
-            self.current_waypoint = self.reference_path.waypoints[next_wp_id]
         else:
             self.wp_id = prev_wp_id
-            self.current_waypoint = self.reference_path.waypoints[prev_wp_id]
+        self.current_waypoint = self.reference_path.waypoints[self.wp_id]

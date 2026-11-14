@@ -17,7 +17,7 @@ class MPC:
         self.horizon = 20
         globals.horizon = self.horizon
 
-        self.mpc_Ts = 0.025
+        self.mpc_Ts = 0.05
 
         self.current_prediction = None
 
@@ -97,8 +97,8 @@ class MPC:
         # input constraints
         self.mpc.bounds["lower", "_u", "acc"] = -0.5
         self.mpc.bounds["upper", "_u", "acc"] = 0.5
-        self.mpc.bounds["lower", "_u", "delta"] = -0.33
-        self.mpc.bounds["upper", "_u", "delta"] = 0.33
+        self.mpc.bounds["lower", "_u", "delta"] = -0.26
+        self.mpc.bounds["upper", "_u", "delta"] = 0.26
 
         if reset is True:
             self.mpc.setup()

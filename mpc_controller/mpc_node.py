@@ -2,10 +2,11 @@ import time
 
 import numpy as np
 import rclpy
-import rerun as rr
-import rerun.blueprint as rrb
 import yaml
 import math
+
+from . import globals
+
 
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import Point
@@ -25,6 +26,7 @@ from nav_msgs.msg._odometry import Odometry
 from geometry_msgs.msg import Point, TransformStamped
 from tf2_ros import TransformBroadcaster
 from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener
 
 
 class MPCNode(Node):
@@ -43,6 +45,8 @@ class MPCNode(Node):
         self.mpc_period = 0.025
 
         self.load_from_yaml()
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         marker_qos = QoSProfile(
             depth=1,
@@ -75,7 +79,7 @@ class MPCNode(Node):
         self.odom_sub = self.create_subscription(
             Odometry,
             "/odom",
-            self.odom_callback,
+            self.vehicle_state_callback,
             qos_profile_sensor_data,
         )
 
@@ -90,7 +94,14 @@ class MPCNode(Node):
             10,
         )
 
-    def odom_callback(self, msg: Odometry):
+    def vehicle_state_callback(self, msg: Odometry):
+        """Update the vehicle state self.x0 = [x, y, psi, v, 0] in the World frame.
+
+        Triggered by every /odom message:
+          - pose (x, y, psi) from TF World -> base_link (same source as Foxglove)
+          - speed v from the odometry message (forward speed in the car frame)
+          - dt between two odometry messages, for the distance update of the MPC
+        """
         current_time = Time.from_msg(msg.header.stamp)
 
         if self.last_odom_time_stamp is None:
@@ -101,28 +112,29 @@ class MPCNode(Node):
 
         self.last_odom_time_stamp = current_time
 
-        x = msg.pose.pose.position.x
-        y = msg.pose.pose.position.y
-        q = msg.pose.pose.orientation
+        # car pose in World from TF: World -> odom (start pose, published by Isaac)
+        # combined with odom -> base_link (odometry). Same source as Foxglove, so the
+        # MPC and the display always agree. Time() = latest available transform.
+        try:
+            tf = self.tf_buffer.lookup_transform("World", "base_link", Time())
+        except Exception as error:
+            self.get_logger().warn(
+                f"no TF World -> base_link yet: {error}", throttle_duration_sec=2.0
+            )
+            return
+
+        x_map = tf.transform.translation.x
+        y_map = tf.transform.translation.y
 
         # based on https://www.vcalc.com/wiki/quaternion-to-roll-pitch-yaw
-        # convert a quanternium into yaw
+        # convert a quaternion into yaw
+        q = tf.transform.rotation
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y**2 + q.z**2)
-        psi = math.atan2(siny_cosp, cosy_cosp)
+        psi_map = math.atan2(siny_cosp, cosy_cosp)
 
+        # forward speed in the car frame (from the odometry message)
         velocity = msg.twist.twist.linear.x
-
-        theta = -np.pi / 2
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
-
-        x_map = 1.75 + cos_theta * x - sin_theta * y
-        y_map = 5.25 + sin_theta * x + cos_theta * y
-        psi_map = np.arctan2(
-            np.sin(psi + theta),
-            np.cos(psi + theta),
-        )
 
         self.x0 = np.array(
             [
@@ -139,7 +151,7 @@ class MPCNode(Node):
 
     def load_from_yaml(self):
         with open(
-            "athena-simulation-isaac-sim/src/mpc_controller/config/waypoints.yaml",
+            "athena-simulation-isaac-sim/src/mpc_controller/config/waypoints-stage-2-track.yaml",
             "r",
         ) as stream:
             data = yaml.full_load(stream)
@@ -148,7 +160,7 @@ class MPCNode(Node):
     def publish_waypoints(self):
         marker = Marker()
 
-        marker.header.frame_id = "world"
+        marker.header.frame_id = "World"
         marker.header.stamp = self.get_clock().now().to_msg()
 
         marker.ns = "waypoints"
@@ -184,7 +196,7 @@ class MPCNode(Node):
     def publish_current_waypoint(self, current_x, current_y):
         marker = Marker()
 
-        marker.header.frame_id = "world"
+        marker.header.frame_id = "World"
         marker.header.stamp = self.get_clock().now().to_msg()
 
         marker.ns = "current_waypoint"
@@ -226,7 +238,7 @@ class MPCNode(Node):
             # length=0.28,
             # width=0.14,
             length=0.26,
-            width=0.135,
+            width=0.17,
             reference_path=self.reference_path,
             # Ts=0.05,
         )
@@ -278,10 +290,32 @@ class MPCNode(Node):
 
         self.controller.mpc.set_initial_guess()
 
+    def find_closest_waypoint(self, x, y):
+        min_distance = float("inf")
+        closest_wp_id = 0
+
+        for i, waypoint in enumerate(self.vehicle.reference_path.waypoints):
+            distance = np.sqrt((waypoint.x - x) ** 2 + (waypoint.y - y) ** 2)
+            if distance < min_distance:
+                min_distance = distance
+                closest_wp_id = i
+
+        return closest_wp_id
+
     def mpc_callback(self):
         if self.x0 is None:
             return
 
+        # 1. which waypoint is the car closest to (index)
+        closest_wp_id = self.find_closest_waypoint(self.x0[0], self.x0[1])
+
+        # 2. translate index -> meters along the path
+        sum_length = np.concatenate(
+            ([0.0], np.cumsum(self.vehicle.reference_path.segment_lengths))
+        )
+        globals.s = sum_length[closest_wp_id]
+
+        # 3. pass the vehicle state, as before
         u, current_x, current_y = self.controller.get_control(self.x0)
 
         self.publish_current_waypoint(
@@ -289,7 +323,7 @@ class MPCNode(Node):
             current_y,
         )
 
-        self.controller.distance_update(self.x0, self.latest_odom_dt)
+        # self.controller.distance_update(self.x0, self.latest_odom_dt)
 
         acc = float(u[0])
         delta = float(u[1])
@@ -309,6 +343,10 @@ class MPCNode(Node):
         ackermann_msg.drive.steering_angle = delta
 
         self.ackermann_pub.publish(ackermann_msg)
+
+        self.get_logger().info(
+            f"psi car: {self.x0[2]:.2f}  psi ref: {self.controller.vehicle.current_waypoint.psi:.2f}"
+        )
 
 
 def main():
